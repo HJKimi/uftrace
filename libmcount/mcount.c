@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <gelf.h>
+#include <dlfcn.h>
 
 /* This should be defined before #include "utils.h" */
 #define PR_FMT     "mcount"
@@ -695,6 +696,122 @@ static void segfault_handler(int sig)
 	raise(sig);
 }
 
+void (*real_cxa_throw)(void *, void *, void *);
+void*(*real_cxa_begin_catch)(void *);
+void (*real_cxa_end_catch)(void);
+
+void __visible_default __cxa_throw(void *exception, void *type, void *dest)
+{
+	struct mcount_thread_data *mtdp;
+
+	/*
+	 * restore return addresses so that it can unwind stack frames
+	 * during the exception handling.  it pairs to __cxa_end_catch().
+	 */
+	mcount_restore();
+
+	mtdp = get_thread_data();
+	if (!check_thread_data(mtdp))
+		pr_dbg("exception thrown from [%d]\n", mtdp->idx);
+
+	real_cxa_throw(exception, type, dest);
+}
+
+#if 0
+/* XXX: processing here makes the exception not to be caught */
+__visible_default void * __cxa_begin_catch(void *exception)
+{
+	struct mcount_thread_data *mtdp;
+	struct mcount_ret_stack *rstack;
+	unsigned long retaddr = (long)__builtin_frame_address(0);
+
+	pr_dbg2("exception returned at %#lx\n", retaddr);
+
+	mtdp = get_thread_data();
+	if (!check_thread_data(mtdp)) {
+		int idx;
+
+		/*
+		 * re-hook return addresses for mcount_return to be called
+		 * again.  we don't know how much stack frame was unwinded
+		 * during an exception.  guess it by comparing to the parent
+		 * (return address) location.
+		 */
+		for (idx = mtdp->idx - 1; idx >= 0; idx--) {
+			rstack = &mtdp->rstack[idx];
+
+			pr_dbg2("[%d] parent at %p\n", idx, rstack->parent_loc);
+			if (rstack->parent_loc == &mtdp->cygprof_dummy)
+				break;
+
+			if ((unsigned long)rstack->parent_loc > retaddr)
+				break;
+
+			/* record unwinded functions */
+			if (!(rstack->flags & MCOUNT_FL_NORECORD))
+				rstack->end_time = mcount_gettime();
+
+			mcount_exit_filter_record(mtdp, rstack, NULL);
+		}
+
+		/* we're in ENTER state, so add 1 to the index */
+		mtdp->idx = idx + 1;
+		pr_dbg("exception returned to [%d]\n", mtdp->idx);
+
+		mcount_reset();
+	}
+
+	return real_cxa_begin_catch(exception);
+}
+
+#else
+
+void __visible_default __cxa_end_catch(void)
+{
+	struct mcount_thread_data *mtdp;
+	struct mcount_ret_stack *rstack;
+	unsigned long retaddr = (long)__builtin_frame_address(0);
+
+	real_cxa_end_catch();
+
+	pr_dbg2("exception returned at %#lx\n", retaddr);
+
+	mtdp = get_thread_data();
+	if (!check_thread_data(mtdp)) {
+		int idx;
+
+		/*
+		 * re-hook return addresses for mcount_return to be called
+		 * again.  we don't know how much stack frame was unwinded
+		 * during an exception.  guess it by comparing to the parent
+		 * (return address) location.
+		 */
+		for (idx = mtdp->idx - 1; idx >= 0; idx--) {
+			rstack = &mtdp->rstack[idx];
+
+			pr_dbg2("[%d] parent at %p\n", idx, rstack->parent_loc);
+			if (rstack->parent_loc == &mtdp->cygprof_dummy)
+				break;
+
+			if ((unsigned long)rstack->parent_loc > retaddr)
+				break;
+
+			/* record unwinded functions */
+			if (!(rstack->flags & MCOUNT_FL_NORECORD))
+				rstack->end_time = mcount_gettime();
+
+			mcount_exit_filter_record(mtdp, rstack, NULL);
+		}
+
+		/* we're in ENTER state, so add 1 to the index */
+		mtdp->idx = idx + 1;
+		pr_dbg("exception returned to [%d]\n", mtdp->idx);
+
+		mcount_reset();
+	}
+}
+#endif
+
 /*
  * external interfaces
  */
@@ -838,6 +955,10 @@ void __visible_default __monstartup(unsigned long low, unsigned long high)
 
 out:
 	pthread_atfork(atfork_prepare_handler, NULL, atfork_child_handler);
+
+	real_cxa_throw = dlsym(RTLD_NEXT, "__cxa_throw");
+	real_cxa_begin_catch = dlsym(RTLD_NEXT, "__cxa_begin_catch");
+	real_cxa_end_catch = dlsym(RTLD_NEXT, "__cxa_end_catch");
 
 #ifndef DISABLE_MCOUNT_FILTER
 	ftrace_cleanup_filter_module(&modules);

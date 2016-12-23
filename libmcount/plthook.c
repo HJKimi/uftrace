@@ -173,6 +173,10 @@ static const char *skip_syms[] = {
 	"mcount_restore",
 	"mcount_reset",
 	"__libc_start_main",
+	"__cxa_throw",
+	"__cxa_begin_catch",
+	"__cxa_end_catch",
+	"_Unwind_Resume",
 };
 
 static struct dynsym_idxlist skip_idxlist;
