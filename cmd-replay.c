@@ -750,12 +750,23 @@ static void print_remaining_stack(struct opts *opts,
 		return;
 
 	pr_out("\nuftrace stopped tracing with remaining functions");
-	pr_out("\n===============================================\n");
+	pr_out("\n================================================\n");
 
 	for (i = 0; i < handle->nr_tasks; i++) {
 		struct ftrace_task_handle *task = &handle->tasks[i];
+		int zero_count = 0;
+		int k;
 
 		if (task->stack_count == 0)
+			continue;
+
+		for (k = 0; k < task->stack_count; k++) {
+			if (task->func_stack[k].addr)
+				break;
+			zero_count++;
+		}
+
+		if (zero_count == task->stack_count)
 			continue;
 
 		if (skip_sys_exit(opts, task))
@@ -780,9 +791,12 @@ static void print_remaining_stack(struct opts *opts,
 
 			symname = symbol_getname(sym, ip);
 
-			pr_out("[%d] %s\n", task->stack_count, symname);
+			pr_out("[%d] %s\n", task->stack_count - zero_count, symname);
 
 			symbol_putname(sym, symname);
+
+			if (task->stack_count == zero_count)
+				break;
 		}
 		pr_out("\n");
 	}
